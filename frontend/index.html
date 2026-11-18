@@ -59,14 +59,11 @@ createApp({
     const user=ref(localStorage.getItem('lagboard_user')||'');
     const username=ref('admin'), password=ref('123456'), err=ref(''), tab=ref(0), actionErr=ref('');
     const sources=ref([]), arrivals=ref([]), catchups=ref([]);
-    const clockCheck=ref([]), waterLevel=ref([]), policy=ref({ledger:null,paths:[],events:[]});
     const form=ref({source:'订单源', source_clock:'2026-11-16T10:00:00', ingest_clock:'2026-11-16T10:40:00'});
-    const nav=['到达登记','时钟核对','取严策略','水位','滞后分级','补齐恢复'];
+    const nav=['到达登记','滞后分级','补齐恢复'];
     const frozen=computed(()=>sources.value.filter(s=>s.output_mode==='冻结').length);
     const degraded=computed(()=>sources.value.filter(s=>s.output_mode==='降级只读').length);
     function modeClass(m){return m==='冻结'?'bad':(m==='降级只读'?'warn':'ok');}
-    function levelClass(l){return l==='违约'?'bad':(l==='告警'?'warn':'ok');}
-    function ratioOf(r){return r==null?'—':(r*100).toFixed(0)+'%';}
     function auth(){return {Authorization:'Bearer '+token.value,'Content-Type':'application/json'};}
     async function login(){
       err.value='';
@@ -91,24 +88,17 @@ createApp({
       arrivals.value=Array.isArray(a.items)?a.items:[];
       const c=await loadJson('/api/catchups'); if(c===null) return;
       catchups.value=Array.isArray(c.items)?c.items:[];
-      const cc=await loadJson('/api/dual-clock/clock-check'); if(cc===null) return;
-      clockCheck.value=Array.isArray(cc.items)?cc.items:[];
-      const wl=await loadJson('/api/dual-clock/water-level'); if(wl===null) return;
-      waterLevel.value=Array.isArray(wl.items)?wl.items:[];
-      const p=await loadJson('/api/dual-clock/policy'); if(p===null) return;
-      policy.value=p||{ledger:null,paths:[],events:[]};
       if(sources.value.length && !form.value.source) form.value.source=sources.value[0].name;
     }
     async function recordArrival(){
       actionErr.value='';
       const r=await fetch('/api/arrivals',{method:'POST',headers:auth(),body:JSON.stringify(form.value)});
-      const j=await r.json();
-      actionErr.value=r.ok?(`取严滞后 ${j.lag_minutes} 分（源 ${j.lag_source_minutes} / 摄入 ${j.lag_ingest_minutes}）· ${j.level} · ${j.output_mode} · ${j.path}路径`):(j.detail||'失败');
+      const j=await r.json(); actionErr.value=r.ok?(`滞后 ${j.lag_minutes} 分 · ${j.level} · ${j.output_mode}`):(j.detail||'失败');
       await refresh();
     }
     async function doCatchup(name){await fetch('/api/catchup/'+encodeURIComponent(name),{method:'POST',headers:auth()});await refresh();}
     onMounted(()=>{if(token.value)refresh();});
-    return {token,user,username,password,err,tab,nav,sources,arrivals,catchups,form,actionErr,frozen,degraded,modeClass,login,logout,recordArrival,doCatchup,clockCheck,waterLevel,policy,levelClass,ratioOf};
+    return {token,user,username,password,err,tab,nav,sources,arrivals,catchups,form,actionErr,frozen,degraded,modeClass,login,logout,recordArrival,doCatchup};
   },
   template:`
   <div v-if="!token" class="login">
@@ -120,7 +110,7 @@ createApp({
   <div v-if="token" class="wrap">
     <aside>
       <h1>源到达SLA</h1>
-      <p>左侧是各源当前输出态（源目录）；右侧登记到达、双时钟取严裁决与补齐恢复。</p>
+      <p>左侧是各源当前输出态；右侧登记到达并做补齐恢复。</p>
       <div class="src" v-for="s in sources" :key="s.id">
         <b>{{s.name}}</b>
         <span>SLA {{s.sla_minutes}} 分钟</span>
@@ -138,81 +128,31 @@ createApp({
         <div class="card"><h3>降级只读</h3><strong>{{degraded}}</strong></div>
       </div>
       <div class="card" v-show="tab===0">
-        <h3 style="margin-bottom:8px">登记到达（双时钟取严写路径）</h3>
+        <h3 style="margin-bottom:8px">登记到达</h3>
         <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px">
           <div><label>源</label><select v-model="form.source"><option v-for="s in sources" :value="s.name">{{s.name}}</option></select></div>
-          <div><label>源侧发出戳</label><input v-model="form.source_clock"/></div>
-          <div><label>摄入侧落库戳</label><input v-model="form.ingest_clock"/></div>
+          <div><label>源时钟</label><input v-model="form.source_clock"/></div>
+          <div><label>摄入时钟</label><input v-model="form.ingest_clock"/></div>
         </div>
-        <button class="primary" @click="recordArrival">取严裁决并同库事务落库</button>
+        <button class="primary" @click="recordArrival">计算滞后并更新输出态</button>
         <div class="err">{{actionErr}}</div>
-        <h3 style="margin:16px 0 8px">到达列表</h3>
-        <table><thead><tr><th>源</th><th>源侧发出戳</th><th>摄入侧落库戳</th><th>源滞后</th><th>摄入滞后</th><th>取严滞后</th><th>级别</th><th>口径</th></tr></thead>
-        <tbody><tr v-for="a in (arrivals||[]).slice(0,12)" :key="a.id">
-          <td>{{a.source}}</td><td>{{a.source_clock}}</td><td>{{a.ingest_clock}}</td>
-          <td>{{a.lag_source_minutes}} 分</td><td>{{a.lag_ingest_minutes}} 分</td>
-          <td><b>{{a.lag_minutes}} 分</b></td>
-          <td><span class="mode" :class="levelClass(a.level)">{{a.level}}</span></td>
-          <td>{{a.arbitration}}</td>
-        </tr></tbody></table>
+        <div class="timeline" style="margin-top:16px">
+          <div class="item" v-for="a in (arrivals||[]).slice(0,8)" :key="a.id">
+            <b>{{a.source}}</b> · 滞后 {{a.lag_minutes}} 分 · {{a.level}}
+            <div style="color:#64748b;font-size:12px">{{a.source_clock}} → {{a.ingest_clock}}</div>
+          </div>
+        </div>
       </div>
       <div class="card" v-show="tab===1">
-        <h3>时钟核对</h3>
-        <p style="color:#64748b;font-size:13px">每源最新一笔到达的两套戳与取严裁决，读数与到达列表、源目录同源。</p>
-        <table><thead><tr><th>源</th><th>源侧发出戳</th><th>摄入侧落库戳</th><th>源滞后</th><th>摄入滞后</th><th>取严滞后</th><th>级别</th><th>输出态</th></tr></thead>
-        <tbody><tr v-for="r in clockCheck" :key="'cc'+r.source">
-          <td>{{r.source}}</td>
-          <td>{{r.source_clock||'—'}}</td><td>{{r.ingest_clock||'—'}}</td>
-          <td>{{r.lag_source_minutes==null?'—':r.lag_source_minutes+' 分'}}</td>
-          <td>{{r.lag_ingest_minutes==null?'—':r.lag_ingest_minutes+' 分'}}</td>
-          <td><b>{{r.lag_minutes==null?'—':r.lag_minutes+' 分'}}</b></td>
-          <td><span v-if="r.level" class="mode" :class="levelClass(r.level)">{{r.level}}</span><span v-else>—</span></td>
-          <td><span class="mode" :class="modeClass(r.output_mode)">{{r.output_mode}}</span></td>
-        </tr></tbody></table>
-      </div>
-      <div class="card" v-show="tab===2">
-        <h3>取严策略（双时钟裁决簿）</h3>
-        <p style="color:#64748b;font-size:13px" v-if="policy.ledger">钉死日期 {{policy.ledger.pinned_date}} · 当天不得更换 · {{policy.ledger.rule}}</p>
-        <table><thead><tr><th>路径</th><th>语义</th><th>状态</th></tr></thead>
-        <tbody><tr v-for="p in policy.paths" :key="'p'+p.key">
-          <td>{{p.key}}路径</td><td>{{p.label}}</td>
-          <td><span class="mode" :class="p.in_force?'ok':''">{{p.in_force?'在贯彻':'未启用'}}</span></td>
-        </tr></tbody></table>
-        <h3 style="margin:16px 0 8px">双时钟留痕</h3>
-        <table><thead><tr><th>时间</th><th>源</th><th>事件</th><th>详情</th></tr></thead>
-        <tbody><tr v-for="e in policy.events" :key="'e'+e.id">
-          <td>{{e.created_at}}</td><td>{{e.source||'—'}}</td>
-          <td><span class="mode" :class="e.event==='双时钟争用'?'warn':'bad'">{{e.event}}</span></td>
-          <td>{{e.detail}}</td>
-        </tr></tbody></table>
-      </div>
-      <div class="card" v-show="tab===3">
-        <h3>水位</h3>
-        <p style="color:#64748b;font-size:13px">取严滞后对照 SLA 的水位；≤100% 正常，≤200% 告警，再高违约。</p>
-        <table><thead><tr><th>源</th><th>SLA</th><th>取严滞后</th><th>水位</th><th>级别</th><th>输出态</th></tr></thead>
-        <tbody><tr v-for="r in waterLevel" :key="'wl'+r.source">
-          <td>{{r.source}}</td><td>{{r.sla_minutes}} 分</td>
-          <td>{{r.lag_minutes==null?'—':r.lag_minutes+' 分'}}</td>
-          <td style="min-width:160px">
-            <div style="background:#e2e8f0;border-radius:999px;height:10px;overflow:hidden">
-              <div :style="{width:Math.min(100,(r.water_ratio||0)/2*100)+'%',height:'100%',background:r.level==='违约'?'#dc2626':(r.level==='告警'?'#d97706':'#059669')}"></div>
-            </div>
-            <span style="font-size:12px;color:#64748b">{{r.water_ratio==null?'—':ratioOf(r.water_ratio)}}</span>
-          </td>
-          <td><span v-if="r.level" class="mode" :class="levelClass(r.level)">{{r.level}}</span><span v-else>—</span></td>
-          <td><span class="mode" :class="modeClass(r.output_mode)">{{r.output_mode}}</span></td>
-        </tr></tbody></table>
-      </div>
-      <div class="card" v-show="tab===4">
         <h3>分级规则</h3>
-        <p style="color:#64748b;font-size:13px">≤SLA 正常可写；≤2×SLA 告警降级只读；更久违约冻结。取严滞后定级，与目录输出态同库事务落库。</p>
+        <p style="color:#64748b;font-size:13px">≤SLA 正常可写；≤2×SLA 告警降级只读；更久违约冻结。</p>
         <table><thead><tr><th>源</th><th>SLA</th><th>输出态</th><th></th></tr></thead>
         <tbody><tr v-for="s in sources" :key="'g'+s.id">
           <td>{{s.name}}</td><td>{{s.sla_minutes}}</td><td>{{s.output_mode}}</td>
           <td><button class="ghost" @click="doCatchup(s.name)">补齐恢复</button></td>
         </tr></tbody></table>
       </div>
-      <div class="card" v-show="tab===5">
+      <div class="card" v-show="tab===2">
         <h3>补齐记录</h3>
         <table><thead><tr><th>源</th><th>状态</th><th>恢复为</th><th>时间</th></tr></thead>
         <tbody><tr v-for="x in catchups" :key="x.id"><td>{{x.source}}</td><td>{{x.status}}</td><td>{{x.restored_mode}}</td><td>{{x.created_at}}</td></tr></tbody></table>
